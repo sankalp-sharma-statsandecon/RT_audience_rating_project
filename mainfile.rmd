@@ -1,0 +1,350 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+---
+## Audience Movie Rating Project: A Bayesian Regression Analysis
+
+**Load packages and set working directory**
+```{r load-packages, message = FALSE}
+library(ggplot2)
+library(dplyr)
+library(statsr)
+library(BAS)
+library(gridExtra)
+library(cowplot)
+library(xtable)
+library(knitr)
+library(BAS)
+setwd("~/Downloads/R projects")
+```
+
+**Load data**
+```{r load-data}
+main_data <- load("movies.Rdata")
+write.table(movies, "movies_full")
+```
+## 1. Data
+
+1. **Generalizibility**: The sample data covers a time period of 45 years between 1970 and 2014. The data is generalizable enough because it contains 650 observations. However, as figure 1 below shows, observations in the sample increase per year from 1970 to 2014. From a data collector's perspective this might be because internet reviews coincided with the rise of the internet itself. We can see this phenomena in figure 2: there are more IMDB votes for movies recently released (not all) compared to the ones in 1980s. Thus from a modeling standpoint, any movie selected from the early 70s would be hard to predict, since more observational weight is provided to recent releases. 
+2. **Causality**: Since we are considering several variables, which might impact the `audience_score` the data and its variables are adequate. However, measurement errors may arise in the variables. 
+
+
+```{r}
+plot_grid(
+  ggplot(movies, aes(x = thtr_rel_year)) + xlab("Release year") + ylab("Frequency") +
+    geom_histogram(bins=30),
+  ggplot(movies, aes(y = imdb_num_votes, x = thtr_rel_year)) + xlab("Release year") + ylab("IMDB No. of Votes") +
+    geom_point()+geom_smooth(method = lm),
+  labels = c(1:2)
+)
+```
+
+
+## 2. Data manipulation.
+Create all required variables.
+
+```{r create variables}
+movies_main <- movies %>% 
+  mutate(
+    oscar_season = ifelse(thtr_rel_month == 10| thtr_rel_month == 11| thtr_rel_month == 12, "yes","no"),
+    summer_season = ifelse(thtr_rel_month == 5| thtr_rel_month == 6| thtr_rel_month == 7|
+                           thtr_rel_month == 8, "yes","no"),
+    feature_film = ifelse(title_type == "Feature Film", "yes", "no"),
+    drama = ifelse(genre == "Drama", "yes", "no"),
+    mpaa_rating_R = ifelse(mpaa_rating == "R", "yes", "no"),
+  )
+
+```
+
+Select the necessary variables for analysis. 
+```{r main variables}
+movies_main <- movies_main %>%
+  select(feature_film, drama, runtime, mpaa_rating_R, thtr_rel_year, oscar_season,
+         summer_season, imdb_rating, imdb_num_votes, critics_score, best_pic_nom,
+         best_pic_win, best_actor_win, best_actress_win, best_dir_win, top200_box, audience_score)
+```
+
+Convert necessary variables to factors.
+```{r convert to factors}
+names <- c("oscar_season","summer_season","feature_film","drama","mpaa_rating_R")
+movies_main[,names] <- lapply(movies_main[,names],factor)
+#glimpse(movies_main)
+```
+
+## 3. Exploratory data analysis
+
+```{r}
+movies_main_gg <- movies_main[,names] #subset data
+movies_main_gg <- movies_main_gg[,c(3,4,1,2,5)]
+
+P = list()
+for (i in names(movies_main_gg)){
+  mydata = data.frame(covr1 = movies_main_gg[[i]], as = movies_main$audience_score)
+  p = ggplot(mydata, aes(x = covr1, y = as))+
+    geom_boxplot(notch=F) + labs(x = paste0(i), y = "Audience Score")+
+    stat_summary(fun=mean, geom="point", shape=23, size=4)
+    theme(plot.title = element_text(size = 9))
+  P = c(P, list(p))
+}
+
+library(cowplot)
+plot_grid(plotlist = P, labels = c(1:5), ncol = 3)
+
+```
+
+```{r}
+movies_summary <- movies_main %>%
+  select(feature_film,drama,oscar_season,summer_season,mpaa_rating_R)
+summary_data <- data.frame(
+  "Variable" = c("Feature film","Drama","Oscar season","Summer season","R rating"),
+  "Yes" = c(sum(ifelse(movies_summary[,1]=="yes",1,0)),
+            sum(ifelse(movies_summary[,2]=="yes",1,0)),
+            sum(ifelse(movies_summary[,3]=="yes",1,0)),
+            sum(ifelse(movies_summary[,4]=="yes",1,0)),
+            sum(ifelse(movies_summary[,5]=="yes",1,0))),
+  "No" = c(sum(ifelse(movies_summary[,1]=="no",1,0)),
+           sum(ifelse(movies_summary[,2]=="no",1,0)),
+           sum(ifelse(movies_summary[,3]=="no",1,0)),
+           sum(ifelse(movies_summary[,4]=="no",1,0)),
+           sum(ifelse(movies_summary[,5]=="no",1,0)))
+)
+summary_addon <- data.frame(
+  "Audience score" = "Audience score",
+  "Mean" = mean(movies_main$audience_score),
+  "Median" = median(movies_main$audience_score)
+)
+#xtable(summary_data)
+knitr::kable(summary_data,"markdown")
+knitr::kable(summary_addon,"markdown")
+```
+
+The above plot grid compares the outcome of interest (audience score) with new explanatory varibles using boxplots. The diamond-shaped box and the line indicates each category's mean and median audience score, respectively.
+
+* **Figure 1**: We observe that non-feature films have higher median audience scores and lower variance. Although, it is difficult to ascertain whether this a statistically significant effect given the small number of non-feature film observations (see first row of summary table above). 
+* **Figure 2**: Dramas are rated higher than non-dramas and have smaller variance. 
+* **Figure 3**: Whether the movie is released in oscar season or not seems to matter little, with oscar season releases having a marginally higher median score and nearly identical mean. 
+* **Figure 4 & 5**: Audience score for summer season versus non-summer releases and rated R versus non-R releases is approximately identical. Variance of audience scores of rated R films is marginally higher. 
+
+## 4. Modeling
+
+We begin by examining the importance of our explanatory variables under all relevant priors and thereby searching for the prior, which will be used in the final model. 
+
+```{r}
+movies_main <- na.omit(movies_main)
+
+# Unit information prior
+mod.fit.g <- bas.lm(audience_score ~ ., data=movies_main, prior="g-prior", 
+            a =nrow(movies_main), modelprior=uniform())
+# a is the hyperparameter in this case g=n
+
+#Zellner-Siow prior with Jeffrey's reference prior on sigma^2
+mod.fit.ZS <- bas.lm(audience_score ~ ., data=movies_main, prior="JZS", 
+               modelprior=uniform())
+
+# Hyper g/n prior
+mod.fit.HG <- bas.lm(audience_score ~ ., data=movies_main, prior="hyper-g-n", 
+               a=3, modelprior=uniform()) 
+# hyperparameter a=3
+
+# Empirical Bayesian estimation under maximum marginal likelihood
+mod.fit.EB <- bas.lm(audience_score ~ ., data=movies_main, prior="EB-local", 
+              a = nrow(movies_main), modelprior=uniform())
+
+# BIC to approximate reference prior
+mod.fit.BIC <- bas.lm(audience_score ~ ., data=movies_main, prior="BIC", 
+                modelprior=uniform())
+
+# AIC
+mod.fit.AIC <- bas.lm(audience_score ~ ., data=movies_main, prior="AIC", 
+                modelprior=uniform())
+```
+
+In order to compare the posterior inclusion probability (pip) of each coefficient, we group the results $p(\beta_i\neq0)$ obtained from the `probne0` attribute of each model for later comparison.
+
+```{r}
+probne0 = cbind(mod.fit.g$probne0, mod.fit.BIC$probne0, mod.fit.ZS$probne0, mod.fit.EB$probne0,
+                mod.fit.HG$probne0, mod.fit.AIC$probne0)
+
+colnames(probne0) = c("g","BIC", "ZS", "EB","HG", "AIC")
+rownames(probne0) = c(mod.fit.BIC$namesx)
+#include_list <- c("Intercept","runtime","imdb_rating","critics_score")
+#probne0 <- probne0[include_list,]
+
+# Generate plot for each variable and save in a list
+P = list()
+for (i in 1:nrow(probne0)){
+  mydata = data.frame(prior = colnames(probne0), posterior = probne0[i, ])
+  mydata$prior = factor(mydata$prior, levels = colnames(probne0))
+  p = ggplot(mydata, aes(x = prior, y = posterior)) +
+    geom_bar(stat = "identity") + xlab("") +
+    ylab("") + theme(text = element_text(size=9), axis.text.x = element_text(angle=90, hjust=1))+
+    ggtitle(rownames(probne0)[i])+
+    theme(plot.title = element_text(size = 9))
+  P = c(P, list(p))
+}
+
+library(cowplot)
+plot_grid(plotlist = P)
+```
+
+We observe that $AIC$ prior is the least conservative and `imdb_rating` and `critics_score` have high posterior inclusion probabilties (greater than 0.8) in all the prior categories. Thus we choose $BIC$ as the prior since it is not as conservatice as the $g-prior$, but more conservative than the rest.  
+
+### **The Bayesian linear regression model (prior = BIC)**:
+```{r message=FALSE, warning=FALSE}
+mod.fit <- bas.lm(
+  audience_score ~ .,
+  data = movies_main,
+  prior = "BIC",
+  modelprior = uniform(),
+  method = "MCMC",
+)
+coef1 <- coef(mod.fit)
+ci <- confint(coef1)[,1:2]
+names <- c("posterior mean", "posterior std", "pip", colnames(ci))
+out <- cbind(coef1$postmean, coef1$postsd, coef1$probne0, ci)
+colnames(out) = names
+#Rearrange posterior probabilities in descending order and print. 
+out <- data.frame(out)
+out <- out[order(-out$pip),]
+knitr::kable(round(out,4))
+```
+
+**Coefficients graphs**
+```{r}
+par(mfrow=c(2,2))
+plot(coef(mod.fit), subset = c(1,4,9,11), ask = F)
+```
+
+The posterior inclusion probabilities are listed in descending order in the above table to highlight important predictors in our model. The variables `imdb_rating` has a posterior mean of 14.98, while critics_score is 0.0627. We also demonstrate the 95% credible intervals of all the predictors. Given this data, we believe that there is a 95% chance that the audience_score increases by 13.67 to 16.53 as the `imdb_rating` increases by one. The lower limit of critics_score's credible interval includes 0, thus raising doubts about the importance of that variable. `runtime` is also included in the coefficient graphs grid, since it has a posterior inclusion probability of greater than 0.4.
+
+**Model diagnostics**
+
+We use the "MCMC" sampler until the number of unique models in the sample exceeds the number of models ($2^{17}=131072$, where $17$ is the total number of predictors) or until the number of iteration exceeds $262144(=2\times131072)$, whichever is smaller.
+
+```{r message=FALSE, warning=FALSE}
+par(mfrow=c(1,2))
+diag1 <- c("pip","model")
+for(i in 1:2){
+  diagnostics(mod.fit, type=diag1[[i]], col = "blue", pch = 16, cex.lab = 0.7,
+           cex.main = 0.7)
+}
+```
+
+The plot on the left verifies whether the MCMC exploration has run long enough so that the posterior inclusion probability (pip) has converged. Since all the points are on the 45 degree line, we conclude that the pip of each variable from MCMC has converged well enough to the theoretical pip. The plot on the right also confirms that the model posterior probabilities have also converged. 
+
+```{r}
+par(mfrow=c(2,2))
+for(i in 1:4){
+  plot(mod.fit, which = i, ask = F, add.smooth = F, 
+             pch = 16, cex.lab = 0.7)
+}
+```
+
+* **Figure top-left**: We observe non-constant variance around 0 for fitted values between 0 and 40. However, as fitted value increases, the variance becomes constant around zero. The results thus show minor heteroskedasticity.  
+* **Figure top-right**: We observe that after about 1,000 unique models with MCMC sampling, the probability levels off, indicating that additional models have very small probability and do not contribute substantially to the posterior distribution. 
+* **Figure bottom-left**: This plot is the model size (number of predictors in each model) versus the bayes factor to compare each model to the null model (the one with only the intercept). We observe that several models with the highest Bayes Factors contain between 4 to 9 predictors. Null model has $BF=1$. 
+* **Figure bottom-right**: The lines in red correspond to the variables where the marginal posterior inclusion probability (pip), is greater than 0.5. These are `imdb_rating` and `critics_score` besides the `intercept`, suggesting that these variables are important for prediction. The variables represented in grey lines have posterior inclusion probability less than 0.5.   
+
+**Model Rank**
+```{r}
+image(mod.fit, rotate=F, cex.axis=0.8)
+```
+
+We can see that the best ranked model includes `runtime`, `imdb_rating` and `critics_score`, besides the `intercept`.
+
+## 5. Prediction
+
+* We build two predictive models for our analysis. First, we predict using the full model as specified in the question and compare the best predictive model (BPM), median probability model (MPM), highest probability model (HPM) and Bayesian model averaging (BMA).
+* Then, we predict using a parsimonious model, the one with the highest log posterior odds. The movie chosen for prediction is "The Accountant" (released in October 2016): [reference](https://www.imdb.com/title/tt2140479/)
+
+**Prediction with full model**:
+```{r message=FALSE, warning=FALSE}
+accountant <- data.frame(
+  feature_film = "yes", drama="no", 
+  runtime=128, mpaa_rating_R = "yes", 
+  thtr_rel_year = 2016, oscar_season = "yes", 
+  summer_season = "no", imdb_rating = 7.3,
+  imdb_num_votes = 249681, critics_score=52, 
+  best_pic_nom = "no", best_pic_win = "no",
+  best_actor_win = "no", best_actress_win = "no",
+  best_dir_win = "no", top200_box = "no"
+)
+predict_1.1 <- predict(mod.fit, accountant, estimator="HPM", interval = "predict", se.fit=F)
+predict_1.2 <- predict(mod.fit, accountant, estimator="BPM", interval = "predict", se.fit=F)
+predict_1.3 <- predict(mod.fit, accountant, estimator="BMA", interval = "predict", se.fit=F)
+predict_1.4 <- predict(mod.fit, accountant, estimator="MPM", interval = "predict", se.fit=F)
+
+predict_data <- data.frame(
+  "Movie (Accountant)" = c("Full model-HPM","Full model-BPM", "Full model-BMA", "Full model-MPM"),
+  "Estimated audience score" = c(predict_1.1$Ybma, predict_1.2$Ybma, 
+                                 predict_1.3$Ybma, predict_1.4$Ybma),
+  "Real audience score" = 76
+)
+knitr::kable(predict_data,"markdown")
+```
+
+**The explanatory variables common in the best model are**:
+
+```{r}
+intersect(intersect(predict_1.1$best.vars, predict_1.2$best.vars), 
+          intersect(predict_1.3$best.vars, predict_1.4$best.vars))
+```
+
+
+```{r}
+#Model with best BMA
+mod.fit.pars <- bas.lm(
+  audience_score ~ imdb_rating + critics_score,
+  data = movies_main,
+  prior = "BIC",
+  modelprior = uniform(),
+)
+
+accountant.pars <- data.frame(
+  imdb_rating = 7.3, critics_score = 52
+)
+predict_2 <- predict(mod.fit.pars, accountant.pars, estimator = "HPM", interval = "predict", se.fit = T)
+
+#Model with best BMA and runtime included
+mod.fit.pars.runtime <- bas.lm(
+  audience_score ~ imdb_rating + critics_score + runtime,
+  data = movies_main,
+  prior = "BIC",
+  modelprior = uniform()
+)
+
+accountant.pars.runtime <- data.frame(
+  imdb_rating = 7.3, critics_score = 52, runtime = 128
+)
+predict_3 <- predict(mod.fit.pars.runtime, accountant.pars.runtime, estimator = "HPM", 
+                     interval = "predict", se.fit = T)
+
+#Linear Model
+mod.fit.lm <- lm(audience_score~.,
+                 data = movies_main)
+predict_4 <- predict(mod.fit.lm, accountant, interval = "prediction")
+
+predict_data <- data.frame(
+  "Movie (Accountant)" = c("Parsimonious model-BMA", "Parsimonious + runtime model-BMA", "Linear model - full"),
+  "Estimated audience score" = c(predict_2$Ybma, predict_3$Ybma, predict_4[,1]),
+  "Real audience score" = 76
+)
+knitr::kable(predict_data,"markdown")
+```
+
+We make a prediction of 73.78 using the full model (HPM), which is close to the actual audience score (76). Other related models also perform nearly as well. We also compare the Bayesian approach to the frequentist linear model and show that the Bayesian model predicts better.
+
+## 6. Conclusion
+
+In this project we determine the influence of several movie attributes on the Rotten Tomatoes audience score. We discover that only `imdb_rating`, `critics_score` and `runtime` are the major covariates explaining the `audience_score`. 
+
+**Drawbacks**
+
+* The dependent variable 'audience_score' most likely suffers from numerous problems such as arbitrary and [selection bias](https://link.springer.com/chapter/10.1057/9780230280816_29). I define "arbitrary bias" as an umbrella term for measurement errors in the dependent variable. For example, during the time period considered in this sample, any user could submit a rating on Rotten Tomatoes (RT) with or without having watched the movie. Thus we as analysts cannot be certain whether a given audience score is truly representative. For example, if out of 1000 votes (an average of which is the audience score on RT), 200 came from responders who had not seen the movie. (Please note that RT has since [resolved](https://www.rottentomatoes.com/about) this issue by identifying respondents who have watched the movie.
+* Another problem in the dependent variable arises because most respondents on review sites vote or comment when they really care about the underlying product, whether it is a positive or a negative experience. This pattern can be observed in inverted normal distributions of user reviews on Amazon or Yelp (most of the density is observed on 5 (best) or 1: [example](https://www.amazon.com/Apple-MacBook-16-Inch-Storage-2-3GHz/dp/B081FV1Y57/ref=sr_1_4?dchild=1&keywords=macbook%2Bpro&qid=1589826257&sr=8-4&th=1)). This is known as selection bias. 
+* Finally, all explanatory variables, which we observe from factual real-world data have no problems for analysis. The exception being `imdb_rating`, which suffers from the same problems of selection and measurement bias as `audience_score`. 
+
+**Future work**
+
+A more exhaustive investigation would include collecting equitable data from all years (1970 - 2014) and recognizing the endogeneity (simultaneity bias) of `imdb_rating`. For example, just like `imdb_rating` influences `audience_score`, the opposite effect may also be true. 
